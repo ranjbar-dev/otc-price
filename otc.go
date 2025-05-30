@@ -94,17 +94,17 @@ func (o *Otc) CalculateVolatility() float64 {
 
 func (o *Otc) randomizeConfigs() {
 
-	// every 10 seconds
-	if time.Now().Unix()%10 == 0 {
+	// every 60 seconds update upper and lower bounds
+	if time.Now().Unix()%60 == 0 {
 
-		// random number between 0.0 and 0.5
-		random := rand.Float64() * 0.05
+		// random number between 0.0 and 0.3
+		random := rand.Float64() * 0.03
 
-		// generate upper bound 1.00 to 1.10 real price
-		o.upperBound = o.price * (random + 1.05)
+		// generate upper bound 1.00 to 1.03 real price
+		o.upperBound = o.price * (1.0 + random)
 
-		// generate lower bound 0.90 to 1.00 real price
-		o.lowerBound = o.price * (random + 0.95)
+		// generate lower bound 0.97 to 1.00 real price
+		o.lowerBound = o.price * (1.0 - random)
 	}
 
 	// random number between 0.000 and 0.01
