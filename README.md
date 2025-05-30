@@ -15,3 +15,14 @@ run `go run main.go` to start the server
 ### Chart 
 
 run `python plot.py` to see the chart
+
+
+### Data
+
+the data is stored in `data.txt`
+
+
+### Demo 
+
+![alt text](demo.png)
+

@@ -12,10 +12,17 @@ def load_data(filename):
     
     with open(filename, 'r') as f:
         for line in f:
-            real_price, generated_price, timestamp = map(float, line.strip().split(','))
-            timestamps.append(datetime.fromtimestamp(timestamp))
-            real_prices.append(real_price)
-            generated_prices.append(generated_price)
+            try:
+                real_price, generated_price, timestamp_ms = map(float, line.strip().split(','))
+                # Convert millisecond timestamp to seconds for datetime
+                timestamp_seconds = timestamp_ms / 1000
+                timestamps.append(datetime.fromtimestamp(timestamp_seconds))
+                real_prices.append(real_price)
+                generated_prices.append(generated_price)
+            except (ValueError, OSError) as e:
+                print(f"Error processing line: {line.strip()}")
+                print(f"Error details: {e}")
+                continue
     
     return timestamps, real_prices, generated_prices
 
@@ -24,6 +31,10 @@ def create_plot():
     # Load data
     timestamps, real_prices, generated_prices = load_data('data.txt')
     
+    if not timestamps:  # Check if we have any valid data
+        print("No valid data found in the file")
+        return
+        
     # Create figure and axis
     fig, ax = plt.subplots(figsize=(15, 8))
     plt.subplots_adjust(bottom=0.2)  # Make room for slider
@@ -40,7 +51,7 @@ def create_plot():
     ax.legend()
     
     # Format x-axis
-    ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M'))
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M:%S'))
     plt.xticks(rotation=45)
     
     # Add zoom slider
