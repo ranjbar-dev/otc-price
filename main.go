@@ -1,10 +1,9 @@
 package main
 
 import (
-	"encoding/json"
+	"context"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
@@ -13,8 +12,13 @@ import (
 	"time"
 
 	"github.com/adshao/go-binance/v2"
-	"github.com/gorilla/websocket"
 	"github.com/joho/godotenv"
+)
+
+const (
+	maxRetries     = 10
+	initialBackoff = 1 * time.Second
+	maxBackoff     = 5 * time.Minute
 )
 
 type Price struct {
@@ -23,139 +27,79 @@ type Price struct {
 	Time   int64
 }
 
-type PriceUpdate struct {
-	RealPrice      float64 `json:"real_price"`
-	GeneratedPrice float64 `json:"generated_price"`
-	DiffPercent    float64 `json:"diff_percent"`
-	Timestamp      int64   `json:"timestamp"`
-}
+func getPriceChannel(ctx context.Context, wg *sync.WaitGroup) chan Price {
+	priceChan := make(chan Price, 100)
+	var stopChan chan struct{}
 
-type Client struct {
-	conn *websocket.Conn
-	send chan []byte
-}
-
-type WebSocketServer struct {
-	clients    map[*Client]bool
-	broadcast  chan []byte
-	register   chan *Client
-	unregister chan *Client
-	mu         sync.Mutex
-}
-
-var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
-	CheckOrigin: func(r *http.Request) bool {
-		return true // Allow all connections
-	},
-}
-
-func NewWebSocketServer() *WebSocketServer {
-	return &WebSocketServer{
-		clients:    make(map[*Client]bool),
-		broadcast:  make(chan []byte),
-		register:   make(chan *Client),
-		unregister: make(chan *Client),
-	}
-}
-
-func (s *WebSocketServer) Run() {
-	for {
-		select {
-		case client := <-s.register:
-			s.mu.Lock()
-			s.clients[client] = true
-			s.mu.Unlock()
-		case client := <-s.unregister:
-			s.mu.Lock()
-			if _, ok := s.clients[client]; ok {
-				delete(s.clients, client)
-				close(client.send)
-			}
-			s.mu.Unlock()
-		case message := <-s.broadcast:
-			s.mu.Lock()
-			for client := range s.clients {
-				select {
-				case client.send <- message:
-				default:
-					close(client.send)
-					delete(s.clients, client)
-				}
-			}
-			s.mu.Unlock()
-		}
-	}
-}
-
-func (s *WebSocketServer) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
-	conn, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		log.Printf("Error upgrading to websocket: %v", err)
-		return
-	}
-
-	client := &Client{
-		conn: conn,
-		send: make(chan []byte, 256),
-	}
-
-	s.register <- client
-
-	// Start goroutine to read messages from client (if needed)
+	wg.Add(1)
 	go func() {
-		defer func() {
-			s.unregister <- client
-			client.conn.Close()
-		}()
-		for {
-			_, _, err := client.conn.ReadMessage()
-			if err != nil {
-				break
-			}
-		}
-	}()
+		defer wg.Done()
+		defer close(priceChan)
 
-	// Start goroutine to write messages to client
-	go func() {
-		defer func() {
-			client.conn.Close()
-		}()
+		backoff := initialBackoff
+		retryCount := 0
+
 		for {
 			select {
-			case message, ok := <-client.send:
-				if !ok {
-					client.conn.WriteMessage(websocket.CloseMessage, []byte{})
-					return
+			case <-ctx.Done():
+				return
+			default:
+				// Create new channel for this connection attempt
+				stopChan = make(chan struct{})
+
+				wsHandler := func(event *binance.WsKlineEvent) {
+					select {
+					case priceChan <- Price{
+						Symbol: event.Symbol,
+						Price:  event.Kline.Close,
+						Time:   event.Kline.StartTime,
+					}:
+					case <-ctx.Done():
+						return
+					}
 				}
-				if err := client.conn.WriteMessage(websocket.TextMessage, message); err != nil {
+
+				errHandler := func(err error) {
+					log.Printf("WebSocket error: %v\n", err)
+					close(stopChan) // Signal to stop the current connection
+				}
+
+				// Start the WebSocket connection
+				_, _, err := binance.WsKlineServe("BTCUSDT", "1s", wsHandler, errHandler)
+				if err != nil {
+					log.Printf("Error starting WebSocket: %v\n", err)
+					retryCount++
+					if retryCount >= maxRetries {
+						log.Printf("Max retries reached. Giving up.")
+						return
+					}
+					// Calculate next backoff duration
+					backoff = time.Duration(float64(backoff) * 1.5)
+					if backoff > maxBackoff {
+						backoff = maxBackoff
+					}
+					log.Printf("Retrying in %v... (attempt %d/%d)", backoff, retryCount, maxRetries)
+					time.Sleep(backoff)
+					continue
+				}
+
+				// Reset backoff on successful connection
+				backoff = initialBackoff
+				retryCount = 0
+				log.Println("Successfully connected to Binance WebSocket")
+
+				// Wait for either context cancellation or connection error
+				select {
+				case <-ctx.Done():
 					return
+				case <-stopChan:
+					log.Println("Connection lost, attempting to reconnect...")
+					// Don't sleep here as we want to retry immediately on connection loss
+					continue
 				}
 			}
 		}
 	}()
-}
-
-func getPriceChannel() chan Price {
-	priceChan := make(chan Price, 100)
-
-	wsHandler := func(event *binance.WsKlineEvent) {
-		priceChan <- Price{
-			Symbol: event.Symbol,
-			Price:  event.Kline.Close,
-			Time:   event.Kline.StartTime,
-		}
-	}
-
-	errHandler := func(err error) {
-		fmt.Printf("WebSocket error: %v\n", err)
-	}
-
-	_, _, err := binance.WsKlineServe("BTCUSDT", "1s", wsHandler, errHandler)
-	if err != nil {
-		fmt.Printf("Error starting WebSocket: %v\n", err)
-	}
 
 	return priceChan
 }
@@ -165,26 +109,14 @@ func main() {
 		fmt.Printf("Error loading .env file: %v\n", err)
 	}
 
-	// Create WebSocket server
-	wsServer := NewWebSocketServer()
-	go wsServer.Run()
+	// Create context that we can cancel
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	// Handle WebSocket connections
-	http.HandleFunc("/ws", wsServer.HandleWebSocket)
+	// Create WaitGroup for goroutines
+	var wg sync.WaitGroup
 
-	// Start HTTP server
-	server := &http.Server{
-		Addr: ":8080",
-	}
-
-	go func() {
-		fmt.Println("WebSocket server started on :8080")
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("Error starting server: %v", err)
-		}
-	}()
-
-	// Handle graceful shutdown
+	// Handle OS signals for graceful shutdown
 	forever := make(chan struct{})
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
@@ -192,13 +124,14 @@ func main() {
 	go func() {
 		<-sigChan
 		fmt.Println("\nShutting down gracefully...")
-		server.Close()
+		cancel() // Cancel the context
 		forever <- struct{}{}
 	}()
 
-	priceChan := getPriceChannel()
-	otc := NewOtc(0, time.Now().Unix())
+	// Get price channel with retry logic
+	priceChan := getPriceChannel(ctx, &wg)
 
+	// Open file for writing
 	file, err := os.OpenFile("data.txt", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		fmt.Printf("Error opening file: %v\n", err)
@@ -206,13 +139,13 @@ func main() {
 	}
 	defer file.Close()
 
+	otc := NewOtc(0, time.Now().Unix())
+
 	for {
 		select {
 		case data := <-priceChan:
-
 			price, err := strconv.ParseFloat(data.Price, 64)
 			if err != nil {
-
 				fmt.Printf("Error parsing price: %v\n", err)
 				continue
 			}
@@ -220,26 +153,15 @@ func main() {
 			otc.SetAndGeneratePrice(price)
 			diffPercent := (otc.generatedPrice - otc.price) / otc.price * 100
 
-			update := PriceUpdate{
-				RealPrice:      otc.price,
-				GeneratedPrice: otc.generatedPrice,
-				DiffPercent:    diffPercent,
-				Timestamp:      time.Now().Unix(),
-			}
-
-			// write the update to the file
-			file.WriteString(fmt.Sprintf("%.2f,%.2f,%v\n", update.RealPrice, update.GeneratedPrice, update.Timestamp))
-
-			// Convert update to JSON and broadcast to all clients
-			if jsonData, err := json.Marshal(update); err == nil {
-				wsServer.broadcast <- jsonData
-			}
+			// Write the update to the file
+			file.WriteString(fmt.Sprintf("%.2f,%.2f,%v\n", otc.price, otc.generatedPrice, time.Now().Unix()))
 
 			fmt.Printf("Real: %v, Generated: %v, Diff in percent: %v\n",
 				otc.price, otc.generatedPrice, diffPercent)
 
 		case <-forever:
 			fmt.Println("Program terminated")
+			wg.Wait() // Wait for all goroutines to finish
 			return
 		}
 	}
