@@ -28,11 +28,13 @@ type Price struct {
 }
 
 func getPriceChannel(ctx context.Context, wg *sync.WaitGroup) chan Price {
+
 	priceChan := make(chan Price, 100)
 	var stopChan chan struct{}
 
 	wg.Add(1)
 	go func() {
+
 		defer wg.Done()
 		defer close(priceChan)
 
@@ -144,20 +146,22 @@ func main() {
 	for {
 		select {
 		case data := <-priceChan:
+
 			price, err := strconv.ParseFloat(data.Price, 64)
 			if err != nil {
+
 				fmt.Printf("Error parsing price: %v\n", err)
 				continue
 			}
 
 			otc.SetAndGeneratePrice(price)
+
 			diffPercent := (otc.generatedPrice - otc.price) / otc.price * 100
 
 			// Write the update to the file
-			file.WriteString(fmt.Sprintf("%.2f,%.2f,%v\n", otc.price, otc.generatedPrice, time.Now().Unix()))
+			file.WriteString(fmt.Sprintf("%.2f,%.2f,%v\n", otc.price, otc.generatedPrice, data.Time))
 
-			fmt.Printf("Real: %v, Generated: %v, Diff in percent: %v\n",
-				otc.price, otc.generatedPrice, diffPercent)
+			fmt.Printf("Real: %v, Generated: %v, Diff in percent: %v\n", otc.price, otc.generatedPrice, diffPercent)
 
 		case <-forever:
 			fmt.Println("Program terminated")
