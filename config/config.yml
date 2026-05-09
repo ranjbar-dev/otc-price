@@ -1,0 +1,10 @@
+binance:
+  ws_url: wss://stream.binance.com:9443/ws
+  reconnect_delay: 5s
+symbols:
+  - BTCUSDT
+  - ETHUSDT
+interval: 1m
+storage:
+  btcusdt: data/btcusdt.json
+  ethusdt: data/ethusdt.json
